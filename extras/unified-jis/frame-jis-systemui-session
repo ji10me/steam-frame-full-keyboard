@@ -1,0 +1,111 @@
+#!/usr/bin/python3
+"""Prepare a loopback-only inspector for this menu session, restoring settings.
+
+The keyboard needs the actual Frame button context. Only vrwebhelper is
+reloaded when needed; SteamVR server/compositor and streaming remain running.
+"""
+import ctypes as C
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+
+from frame_jis_cdp import systemui_client,require_loopback
+from frame_jis_vr import Overlay
+
+HOME=Path.home()
+EXE=Path('/opt/steamvr/bin/vrwebhelper/linuxarm64/vrwebhelper')
+
+
+def ready():
+    try:
+        client=systemui_client()
+        try:return client.evaluate('typeof FrameStore === "object" && typeof VRHTML?.VROverlay?.ShowKeyboardForOverlay === "function"') is True
+        finally:client.close()
+    except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):return False
+
+
+def processes():
+    found=[]
+    for process in Path('/proc').glob('[0-9]*'):
+        try:
+            if process.stat().st_uid!=os.getuid() or (process/'exe').resolve()!=EXE:continue
+            args=(process/'cmdline').read_bytes().decode().split('\0')[:-1]
+            if any(arg.startswith('--type=') for arg in args):continue
+            env=dict(value.split('=',1) for value in (process/'environ').read_bytes().decode().split('\0') if '=' in value)
+            found.append((int(process.name),args,env,(process/'cwd').resolve()))
+        except (OSError,UnicodeError):continue
+    return found
+
+
+def restart_menu(spec):
+    pid,args,environment,cwd=spec
+    if (Path('/proc')/str(pid)/'exe').resolve()!=EXE:raise RuntimeError('Menu process identity changed')
+    os.kill(pid,signal.SIGTERM)
+    deadline=time.monotonic()+4
+    while Path('/proc',str(pid)).exists() and time.monotonic()<deadline:time.sleep(.05)
+    if Path('/proc',str(pid)).exists():raise RuntimeError('Menu process did not exit')
+    time.sleep(.3)
+    if not processes():
+        subprocess.Popen(args,cwd=cwd,env=environment,start_new_session=True,
+            stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+
+def main():
+    if ready():
+        print(json.dumps({'ready':True,'restartedMenu':False}));return
+    matches=processes()
+    if len(matches)!=1:raise RuntimeError('Expected exactly one owned VR menu process')
+    paths=json.loads((HOME/'.config/openvr/openvrpaths.vrpath').read_text())
+    config_files=[Path(base)/'steamvr.vrsettings' for base in paths['config']]
+    existing=[path for path in config_files if path.exists()]
+    if len(existing)!=1:raise RuntimeError('VR settings path is ambiguous')
+    settings=json.loads(existing[0].read_text()).get('VRWebHelper') or {}
+    before={key:settings[key] for key in ('DebuggerEnabled','DebuggerPort') if key in settings}
+    vr=Overlay();error=C.c_int()
+    pointer=vr.lib.VR_GetGenericInterface(b'FnTable:IVRSettings_003',C.byref(error))
+    if error.value or not pointer:raise RuntimeError('VR settings API unavailable')
+    table=C.cast(pointer,C.POINTER(C.c_void_p))
+    def bind(index,arguments):return C.CFUNCTYPE(None,*arguments)(table[index])
+    set_bool=bind(1,[C.c_char_p,C.c_char_p,C.c_bool,C.POINTER(C.c_int)])
+    set_int=bind(2,[C.c_char_p,C.c_char_p,C.c_int32,C.POINTER(C.c_int)])
+    remove=bind(10,[C.c_char_p,C.c_char_p,C.POINTER(C.c_int)])
+    state=HOME/'.local/state/frame-jis-keyboard';state.mkdir(parents=True,exist_ok=True)
+    (state/'systemui-settings-before.json').write_text(json.dumps(before,indent=2))
+    failure=None;restore_errors=[];restart_attempted=False
+    try:
+        set_int(b'VRWebHelper',b'DebuggerPort',9223,C.byref(error))
+        if error.value:raise RuntimeError('Could not set local inspector port')
+        set_bool(b'VRWebHelper',b'DebuggerEnabled',True,C.byref(error))
+        if error.value:raise RuntimeError('Could not prepare menu inspector')
+        restart_attempted=True;restart_menu(matches[0])
+        deadline=time.monotonic()+6
+        while time.monotonic()<deadline:
+            if ready():break
+            time.sleep(.1)
+        else:raise RuntimeError('Local menu inspector did not become ready')
+        require_loopback(9223)
+    except BaseException as failure_error:
+        failure=failure_error
+    finally:
+        for key in ('DebuggerEnabled','DebuggerPort'):
+            if key in before:
+                (set_bool if key=='DebuggerEnabled' else set_int)(b'VRWebHelper',key.encode(),before[key],C.byref(error))
+            else:remove(b'VRWebHelper',key.encode(),C.byref(error))
+            if error.value:restore_errors.append(key)
+        vr.close()
+    if restore_errors:raise RuntimeError('Could not restore menu debugger settings: '+','.join(restore_errors))
+    if failure:
+        # Remove any partially created inspector with restored settings before
+        # returning to the ordinary native keyboard path.
+        current=processes()
+        if restart_attempted and len(current)==1:restart_menu(current[0])
+        raise failure
+    result={'ready':True,'restartedMenu':True,'settingsRestored':True,'port':9223}
+    (state/'systemui-session.json').write_text(json.dumps(result,indent=2))
+    print(json.dumps(result))
+
+
+if __name__=='__main__':main()

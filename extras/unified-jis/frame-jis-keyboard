@@ -1,0 +1,618 @@
+#!/usr/bin/python3
+"""Opt-in JIS coordinator. Status/commands contain metadata only, never text."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import select
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+from frame_jis_vr import Overlay
+from frame_jis_cdp import systemui_client
+
+HOME = Path.home()
+STATE = HOME / '.local/state/frame-jis-keyboard'
+RUNTIME = HOME / '.local/share/framekeyboard/unified-jis/runtime'
+CONFIG = HOME / '.config/framekeyboard-unified-jis'
+SOCKET = Path('/run/user') / str(os.getuid()) / 'frame-jis-keyboard.sock'
+NATIVE = 'framekeyboard-autostart.service'
+LOCAL = 'framekeyboard-jis-local.service'
+PC = 'valve.steam.desktopgame.2000000420'
+PANEL = 'org.framekeyboard.panel'
+VRCMD = '/opt/steamvr/bin/linuxarm64/vrcmd'
+STOP = False
+NATIVE_START_AT = 0
+NATIVE_PROCESS_PID = 0
+os.environ.update(DISPLAY=':0', XDG_RUNTIME_DIR=str(SOCKET.parent),
+                  DBUS_SESSION_BUS_ADDRESS='unix:path=' + str(SOCKET.parent / 'bus'))
+
+META = r'''(() => {
+ let b=globalThis.__frameUnifiedJisMetadataV1;
+ if(!b){let req;const a=globalThis.webpackChunksteamui;if(!a?.push)return null;
+ const id=Symbol('jis-metadata');a.push([[id],{},r=>req=r]);
+ const i=a.findIndex(v=>v[0]?.[0]===id);if(i>=0)a.splice(i,1);
+ let store;for(const k of Object.keys(req?.m||{})){
+ if(!String(req.m[k]).includes('get VRKeyboardStatus()'))continue;
+ for(const v of Object.values(req(k))){if(v?.m_VRKeyboardState){store=v;break;}}if(store)break;}
+ if(!store)return null;b=globalThis.__frameUnifiedJisMetadataV1={store};}
+ const s=b.store.m_VRKeyboardState;
+ const f=globalThis.vrFrameStore?.activeFrame;
+ return {open:s.m_bIsOpen===true,key:s.m_sOpenForOverlayKey,
+ flags:s.m_eVRKeyboardFlags,dispatch:s.m_bDispatchEventsToSteamVR,
+ frame:f&&Number.isSafeInteger(f.frameID)?{id:f.frameID,visible:f.isVisible===true}:null};
+})()'''
+
+
+def run(args, timeout=12, check=False):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=check)
+
+
+def active(unit):
+    return run(['systemctl', '--user', 'is-active', '--quiet', unit]).returncode == 0
+
+
+def local_key(key):
+    return key == PC or isinstance(key, str) and bool(re.fullmatch(r'gamescope\.gamescope-[0-9]+(?:\.window\.[0-9]+)?', key))
+
+
+def steam_key(key):
+    return isinstance(key, str) and (key in ('valve.steam.gamepadui.main', 'valve.steam.gamepadui.barpopup')
+                                   or key.startswith('valve.steam.gamepadui.appoverlay.'))
+
+
+def load_cdp():
+    path = RUNTIME / 'share/framekeyboard/bridge/native_bridge.py'
+    spec = importlib.util.spec_from_file_location('unified_jis_transport', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.CDP()
+
+
+def native_start(key=''):
+    # Private config starts hidden. Environment is scoped to this service, not
+    # the user manager (whose external-JIS target belongs to local apps).
+    global NATIVE_START_AT,NATIVE_PROCESS_PID
+    if active(NATIVE):
+        if not NATIVE_PROCESS_PID:NATIVE_PROCESS_PID=int(run(['systemctl','--user','show',NATIVE,'-p','MainPID','--value']).stdout.strip() or 0)
+        return
+    if time.monotonic() - NATIVE_START_AT < 2:
+        return
+    NATIVE_START_AT = time.monotonic()
+    (STATE / 'native.env').write_text('FRAMEKEYBOARD_NATIVE_INITIAL_TARGET=' + (key if steam_key(key) else 'current-steam') + '\n')
+    run(['systemctl', '--user', 'start', NATIVE], check=True)
+    NATIVE_PROCESS_PID=int(run(['systemctl','--user','show',NATIVE,'-p','MainPID','--value']).stdout.strip() or 0)
+
+
+def focused(vr, key, frame=None):
+    if frame is not None:
+        try:
+            client=systemui_client()
+            try:
+                return client.evaluate('''FrameStore.frames_local.some(f=>f.frameID===FRAME && DashboardStore.activeFrameID===f.frameID &&
+                    f.pages.some(p=>p.isActiveAndVisiblePage && p.keyboard?.keyboardInputOverlayKey===KEY))'''
+                    .replace('FRAME',str(frame)).replace('KEY',json.dumps(key))) is True
+            finally:client.close()
+        except (OSError,ValueError,EOFError,RuntimeError,TimeoutError):pass
+        try:
+            client = load_cdp()
+            try:
+                current = client.evaluate(META).get('frame')
+            finally:
+                client.close()
+            if not current or not current.get('visible') or current.get('id') != frame:
+                return False
+        except (OSError, ValueError, EOFError, RuntimeError, TimeoutError):
+            return False
+    parent = vr.handle(key)
+    if not parent:
+        return False
+    if vr.bind(69, [__import__('ctypes').c_uint64], __import__('ctypes').c_bool)(parent):
+        return True
+    return key == PC and '= 2000000420' in run(['xprop', '-root', 'GAMESCOPE_FOCUSED_APP']).stdout
+
+
+def restore(vr, key, frame=None):
+    return bool(local_key(key) and focused(vr, key, frame) and vr.native_fallback(key))
+
+
+def local_exit(pid, settle=.4):
+    """Positive success evidence distinguishes the app's Close from a crash.
+
+    /proc disappearance can precede systemd recording the exit status. Never
+    infer an intentional close from an active unit's stale success/zero fields.
+    """
+    deadline = time.monotonic() + settle
+    while True:
+        result = run(['systemctl', '--user', 'show', LOCAL, '-p', 'ActiveState', '-p', 'SubState',
+                      '-p', 'MainPID', '-p', 'Result', '-p', 'ExecMainCode', '-p', 'ExecMainStatus'])
+        fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        current = int(fields.get('MainPID') or 0)
+        if pid and current and current != pid:
+            return 'replaced'
+        if result.returncode == 0 and current == 0 and (fields.get('ActiveState') in ('inactive', 'failed') or
+                fields.get('ActiveState')=='active' and fields.get('SubState')=='exited'):
+            return 'closed' if (fields.get('ActiveState') != 'failed' and
+                fields.get('Result') == 'success' and fields.get('ExecMainCode') == '1' and
+                fields.get('ExecMainStatus') == '0') else 'failed'
+        if time.monotonic() >= deadline:
+            return 'unknown'
+        time.sleep(.025)
+
+
+def close_stock_for(cdp, vr, key):
+    expression = '''(() => {const s=globalThis.__frameUnifiedJisMetadataV1?.store?.m_VRKeyboardState;
+    if(s?.m_bIsOpen===false)return true;
+    if(s?.m_bIsOpen && s.m_sOpenForOverlayKey===KEY && s.m_eVRKeyboardFlags===13 &&
+    s.m_bDispatchEventsToSteamVR===false){SteamClient.OpenVR.Keyboard.Hide();return true;}return false;})()'''.replace('KEY', json.dumps(key))
+    # Initialize the metadata accessor if this is an independent guard client.
+    cdp.evaluate(META)
+    if cdp.evaluate(expression):vr.hide_native()
+
+
+def complete_local_close(vr, key, pid, router=None, cdp=None):
+    """Retire the local request before a watchdog can restore native."""
+    own_router = router is None; own_cdp = cdp is None
+    try:
+        if router is None:
+            try:router = systemui_client()
+            except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):pass
+        if router:
+            accepted=router.evaluate('globalThis.__frameJisFooterRouterV1?.completeClose('+json.dumps(key)+','+str(pid)+')')
+            if accepted is False:return
+        if cdp is None:cdp=load_cdp()
+        close_stock_for(cdp,vr,key)
+    finally:
+        if own_router and router:router.close()
+        if own_cdp and cdp:cdp.close()
+
+
+def guard(fd):
+    """Independent lease and process-progress fallback, outlives coordinator."""
+    channel = socket.socket(fileno=fd)
+    channel.setblocking(False)
+    vr = Overlay()
+    channel.send(b'{"op":"ready"}')
+    key = ''; frame = None; pid = 0; deadline = 0; last_cpu = None; changed = time.monotonic()
+    reason = 'channel-closed'
+    try:
+        while True:
+            readable, _, _ = select.select([channel], [], [], .2)
+            if readable:
+                data = channel.recv(4096)
+                if not data:
+                    break
+                message = json.loads(data)
+                if message['op'] == 'cancel':
+                    key = ''; pid = 0
+                elif message['op'] == 'prepare' and local_key(message.get('key')):
+                    key = message['key']; frame = message.get('frame'); pid = 0
+                    deadline = time.monotonic() + 6
+                    channel.send(b'{"op":"prepared"}')
+                elif message['op'] == 'arm' and local_key(message.get('key')):
+                    key = message['key']; pid = message['pid']; deadline = time.monotonic() + 3
+                    frame = message.get('frame')
+                    last_cpu = None; changed = time.monotonic()
+                    channel.send(b'{"op":"armed"}')
+                elif message['op'] == 'renew' and key:
+                    deadline = time.monotonic() + 3
+            if key and pid:
+                try:
+                    fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+                    cpu = int(fields[11]) + int(fields[12])
+                    if cpu != last_cpu:
+                        last_cpu = cpu; changed = time.monotonic()
+                except OSError:
+                    outcome=local_exit(pid)
+                    if outcome=='replaced':key='';break
+                    if outcome=='closed':
+                        before=focused(vr,key,frame)
+                        try:complete_local_close(vr,key,pid)
+                        except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):pass
+                        (STATE/'guard-state.json').write_text(json.dumps({
+                            'reason':'keyboard-closed','key':key,'focusedBeforeStop':before,
+                            'focusedAfterStop':focused(vr,key,frame),'restored':False,'time':time.time()}))
+                        # Remain available for the next summon; a normal Close
+                        # must not leave the coordinator with a dead channel.
+                        key='';pid=0;continue
+                    reason = 'keyboard-exited'
+                    break
+            if key and (time.monotonic() >= deadline or pid and time.monotonic() - changed > 7):
+                reason = 'lease-or-progress-expired'
+                break
+    finally:
+        if key:
+            before = focused(vr, key, frame)
+            run(['systemctl', '--user', 'stop', LOCAL])
+            after = focused(vr, key, frame)
+            restored = restore(vr, key, frame)
+            (STATE / 'guard-state.json').write_text(json.dumps({
+                'reason': reason, 'key': key, 'focusedBeforeStop': before,
+                'focusedAfterStop': after, 'restored': restored, 'time': time.time()}))
+            if restored:
+                # OpenVR ties this keyboard request to the calling client.
+                # Shutting the guard's VR connection down here would immediately
+                # dismiss the recovered native keyboard as well.
+                deadline = time.monotonic() + 2
+                seen = False
+                while focused(vr, key, frame):
+                    handles = [vr.handle(name) for name in ('valve.steam.gamepadui.keyboard', 'system.keyboard')]
+                    shown = any(h and vr.visible(h) for h in handles)
+                    if shown:
+                        seen = True
+                    elif seen or time.monotonic() >= deadline:
+                        break
+                    time.sleep(.1)
+        channel.close(); vr.close()
+
+
+def daemon():
+    global STOP
+    STATE.mkdir(parents=True, exist_ok=True)
+    signal.signal(signal.SIGTERM, lambda *_: globals().__setitem__('STOP', True))
+    signal.signal(signal.SIGINT, lambda *_: globals().__setitem__('STOP', True))
+    SOCKET.unlink(missing_ok=True)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(SOCKET)); os.chmod(SOCKET, 0o600); server.listen(4); server.setblocking(False)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    recovery = subprocess.Popen([sys.executable, __file__, '--guard', str(child.fileno())],
+                                pass_fds=(child.fileno(),), start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    child.close(); parent.settimeout(.2)
+    parent.settimeout(4)
+    if json.loads(parent.recv(1024)).get('op') != 'ready':
+        raise RuntimeError('recovery-unavailable')
+    parent.settimeout(.2)
+    vr = Overlay(); cdp = None; owner = ''; owner_frame = None; owner_pid = 0
+    anchors = 0; debounce = 0; events = []
+    router = None; handled_footer = 0; router_retry = 0; native_bypass = ''; hidden_since = None
+
+    def send(op, **kwargs):
+        try:parent.send(json.dumps(dict(op=op, **kwargs)).encode())
+        except OSError:
+            if op!='cancel':raise
+
+    def prepare_recovery(key,frame):
+        nonlocal parent,recovery
+        for attempt in range(2):
+            try:
+                if recovery.poll() is not None:raise EOFError()
+                send('prepare',key=key,frame=frame);parent.settimeout(3)
+                data=parent.recv(1024)
+                if not data:raise EOFError()
+                if json.loads(data).get('op')!='prepared':raise RuntimeError('recovery-not-prepared')
+                return
+            except (OSError,EOFError,ValueError,TimeoutError):
+                if attempt or owner:raise
+                parent.close()
+                parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+                recovery=subprocess.Popen([sys.executable,__file__,'--guard',str(child.fileno())],
+                    pass_fds=(child.fileno(),),start_new_session=True,
+                    stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                child.close();parent.settimeout(4)
+                if json.loads(parent.recv(1024)).get('op')!='ready':raise RuntimeError('recovery-unavailable')
+            finally:parent.settimeout(.2)
+
+    def record(code):
+        events.append({'code': code, 'time': time.time()}); del events[:-24]
+        path = STATE / 'state.json'
+        temp = path.with_suffix('.tmp')
+        temp.write_text(json.dumps({'localOwner': owner, 'anchorUpdates': anchors,
+                                    'coordinatorPid':os.getpid(),
+                                    'localPresentationHook': False, 'directFooterRouter': router is not None,
+                                    'events': events}, indent=2))
+        temp.replace(path)
+
+    def close_stock(key):
+        close_stock_for(cdp,vr,key)
+
+    def closed():
+        try:complete_local_close(vr,owner,owner_pid,router,cdp)
+        except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):record('local-close-cleanup-unavailable')
+        dismiss()
+        record('local-closed')
+
+    def dismiss(resume=True, restore_stock=False):
+        nonlocal owner, owner_frame, owner_pid
+        previous = owner
+        previous_frame = owner_frame
+        send('cancel'); owner = ''
+        owner_frame = None
+        owner_pid = 0
+        run(['systemctl', '--user', 'stop', LOCAL])
+        if restore_stock:
+            restore(vr, previous, previous_frame)
+        if resume:
+            native_start()
+        record('local-dismissed')
+
+    def activate(key, from_request=False, footer_frame=None, launch_until=None):
+        nonlocal owner, owner_frame, owner_pid, anchors, debounce, hidden_since
+        hidden_since=None
+        def resume_native():
+            if footer_frame is None: native_start()
+        if not local_key(key) or not vr.handle(key):
+            return False
+        if not from_request:
+            # An explicit shortcut transfers the current keyboard to this app.
+            # Dismiss through the existing generation before stopping resident.
+            cdp.evaluate('globalThis.__fullKeyboardNativeV1?.bridge.dismiss(globalThis.__fullKeyboardNativeV1.bridge.diagnostics().request)')
+            status = cdp.evaluate(META)
+            if status.get('open') and status.get('key') != key:
+                cdp.evaluate('SteamClient.OpenVR.Keyboard.Hide()')
+                vr.hide_native()
+        run(['systemctl', '--user', 'stop', NATIVE], check=True)
+        if footer_frame is None:run([VRCMD, '--showdashboard', key], check=True)
+        if router:router.evaluate('globalThis.__frameJisFooterRouterV1.beginManual('+json.dumps(key)+')')
+        if key != PC:
+            run([str(HOME / '.local/bin/frame-jis-ime-start')], check=True)
+        config = CONFIG / ('pc' if key == PC else 'desktop')
+        # Seed the native app's own placement before launching. The app then
+        # owns dragging/resizing; no follow loop can snap the user's move back.
+        placement = config / 'placement.json'
+        temporary = placement.with_suffix('.tmp')
+        temporary.write_text(json.dumps(vr.placement(key)))
+        temporary.replace(placement)
+        if launch_until is not None and time.monotonic() >= launch_until:
+            return False
+        run(['systemctl', '--user', 'reset-failed', LOCAL])
+        result = run(['systemd-run', '--user', '--unit=' + LOCAL,
+                      # Keep the exit status until Close/crash is classified.
+                      # Otherwise a successful transient unit is immediately
+                      # unloaded and loses ExecMainCode before the guard reads it.
+                      '--property=RemainAfterExit=yes', '--property=CollectMode=inactive',
+                      '--setenv=XDG_CONFIG_HOME=' + str(CONFIG / 'local-runtime-home'),
+                      '--description=Unified local JIS keyboard', '--',
+                      str(RUNTIME / 'bin/framekeyboard'), '--vr', '--input', 'ei', '--start-enabled',
+                      '--target-language', 'ja-jis-frame', '--config-dir', str(config),
+                      '--data-dir', str(RUNTIME / 'share/framekeyboard')])
+        if result.returncode:
+            resume_native(); record('local-start-failed'); return False
+        deadline = min(time.monotonic()+8,launch_until) if launch_until is not None else time.monotonic()+8
+        while time.monotonic() < deadline:
+            panel = vr.handle(PANEL)
+            if panel and vr.visible(panel) and vr.geometry(PANEL):
+                break
+            if not active(LOCAL):
+                break
+            if local_exit(0,settle=0)=='closed':
+                complete_local_close(vr,key,0,router,cdp);send('cancel')
+                resume_native();record('local-closed-during-start');return False
+            time.sleep(.05)
+        else:
+            panel = None
+        if not panel or not vr.visible(panel) or not vr.geometry(PANEL):
+            run(['systemctl', '--user', 'stop', LOCAL]); resume_native()
+            record('local-not-ready'); return False
+        latest = cdp.evaluate(META)
+        if from_request and latest.get('open') and latest.get('key') != key:
+            run(['systemctl', '--user', 'stop', LOCAL])
+            if footer_frame is None:native_start(latest.get('key'))
+            record('owner-changed-during-start'); return False
+        pid = int(run(['systemctl', '--user', 'show', LOCAL, '--property=MainPID', '--value']).stdout.strip() or 0)
+        selected = latest.get('frame') or {}
+        owner_frame = footer_frame if footer_frame is not None else selected.get('id')
+        if router:
+            authoritative=router.evaluate('globalThis.__frameJisFooterRouterV1.poll('+json.dumps(key)+','+str(pid)+','+str(NATIVE_PROCESS_PID)+')')
+            if authoritative.get('ownerFrame') is not None:owner_frame=authoritative['ownerFrame']
+        send('arm', key=key, pid=pid, frame=owner_frame)
+        parent.settimeout(3)
+        try:
+            if json.loads(parent.recv(1024)).get('op') != 'armed':
+                raise RuntimeError('recovery-not-armed')
+        finally:
+            parent.settimeout(.2)
+        if footer_frame is None:close_stock(key)
+        if router is None:run([VRCMD, '--showdashboard', key])
+        owner = key; owner_pid = pid; anchors += 1; debounce = time.monotonic() + .6
+        record('local-ready'); return True
+
+    # A previous coordinator may have died during local startup, before its
+    # owner state was committed. This dedicated unit cannot belong to another
+    # keyboard launcher; finish its shutdown before taking the single instance.
+    run(['systemctl', '--user', 'stop', LOCAL])
+    native_start()
+    record('started')
+    try:
+        while not STOP:
+            start = time.monotonic()
+            try:
+                if cdp is None:
+                    cdp = load_cdp()
+                status = cdp.evaluate(META)
+                if not isinstance(status, dict):
+                    raise RuntimeError('metadata-unavailable')
+                footer=None
+                # The real Frame component is reached before it calls native
+                # ShowKeyboardForOverlay. No native state/window is suppressed.
+                if router is None and start>=router_retry:
+                    try:
+                        router=systemui_client()
+                        source=(RUNTIME.parent/'systemui_router.js').read_text()
+                        router.evaluate('''(() => {globalThis.__frameJisFooterRouterV1?.dispose(false);
+                            globalThis.__frameJisFooterRouterV1=(SOURCE)(globalThis);return true;})()'''.replace('SOURCE',source))
+                        handled_footer=0;record('direct-footer-connected')
+                    except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):
+                        if router:router.close()
+                        router=None;router_retry=start+3
+                if router:
+                    try:
+                        footer=router.evaluate('globalThis.__frameJisFooterRouterV1.poll('+json.dumps(owner)+','+str(owner_pid)+','+str(NATIVE_PROCESS_PID)+')')
+                        native_bypass=footer.get('fallbackKey') or native_bypass
+                        request=footer.get('pending')
+                        if request and request['id']>handled_footer:
+                            handled_footer=request['id'];key=request['key'];frame=request['frame']
+                            allowed=local_key(key)
+                            if allowed and request['action']=='hide':
+                                if owner:dismiss()
+                                router.evaluate(f'globalThis.__frameJisFooterRouterV1.ack({handled_footer},false)')
+                            elif allowed and request['action']=='show' and router.evaluate(f'globalThis.__frameJisFooterRouterV1.busy({handled_footer})'):
+                                if owner:dismiss(False)
+                                prepare_recovery(key,frame)
+                                success=activate(key,True,footer_frame=frame,launch_until=time.monotonic()+4.5)
+                                accepted=success and router.evaluate(f'globalThis.__frameJisFooterRouterV1.ack({handled_footer},true,{owner_pid})')
+                                if not accepted:
+                                    if owner:dismiss(False)
+                                    else:run(['systemctl','--user','stop',LOCAL]);send('cancel')
+                                    router.evaluate(f'globalThis.__frameJisFooterRouterV1.reject({handled_footer})')
+                                    native_bypass=key;native_start()
+                            else:router.evaluate(f'globalThis.__frameJisFooterRouterV1.reject({handled_footer})')
+                            status=cdp.evaluate(META)
+                    except (OSError,ValueError,RuntimeError,EOFError,TimeoutError,subprocess.SubprocessError):
+                        previous=owner
+                        if owner:dismiss(False,True)
+                        router.close();router=None;router_retry=time.monotonic()+3
+                        native_bypass=previous;native_start();record('direct-footer-unavailable')
+                readable, _, _ = select.select([server], [], [], 0)
+                if readable:
+                    connection, _ = server.accept(); connection.settimeout(.5)
+                    with connection:
+                        command = json.loads(connection.recv(2048))
+                        action = command.get('action'); key = command.get('key')
+                        if action == 'hide' or action == 'toggle' and owner and key == owner:
+                            if owner:
+                                dismiss()
+                            else:
+                                # Steam sessions use their own generation-aware dismissal.
+                                cdp.evaluate('globalThis.__fullKeyboardNativeV1?.bridge.dismiss(globalThis.__fullKeyboardNativeV1.bridge.diagnostics().request)')
+                            ok = True
+                        elif action in ('show', 'toggle') and local_key(key):
+                            if owner and owner != key:
+                                dismiss(False)
+                            ok = owner == key or activate(key)
+                        else:
+                            ok = action == 'status'
+                        connection.sendall(json.dumps({'ok': ok, 'localOwner': owner}).encode())
+                    # Activation can hide the old native request. Do not act on
+                    # the snapshot captured before this explicit command.
+                    status = cdp.evaluate(META)
+                key = status.get('key')
+                local_request = status.get('open') and local_key(key) and status.get('flags') == 13 and status.get('dispatch') is False
+                if local_request and owner==key and not active(LOCAL):
+                    if local_exit(owner_pid)=='closed':closed()
+                    else:
+                        dismiss(False,True);native_bypass=key;native_start()
+                        if router:router.evaluate('globalThis.__frameJisFooterRouterV1.nativeFallback('+json.dumps(key)+')')
+                    local_request=False
+                    status=cdp.evaluate(META)
+                if native_bypass and not status.get('open'):native_bypass=''
+                if key==native_bypass:local_request=False
+                if local_request and start >= debounce:
+                    if owner == key:
+                        close_stock(key); dismiss(); debounce = time.monotonic() + .6
+                    else:
+                        if owner:
+                            dismiss(False)
+                        if not activate(key, from_request=True):
+                            # Retain native and avoid retrying one unsupported
+                            # request every frame while startup is failing.
+                            debounce = time.monotonic() + 3
+                elif owner and status.get('open') and key != owner:
+                    dismiss(False)
+                    native_start(key if steam_key(key) else '')
+                if owner:
+                    # Activation can change the owner and selected frame. The
+                    # poll from before that blocking launch belongs to the old
+                    # owner, so obtain fresh focus metadata before dismissing.
+                    if router:
+                        footer=router.evaluate('globalThis.__frameJisFooterRouterV1.poll('+json.dumps(owner)+','+str(owner_pid)+','+str(NATIVE_PROCESS_PID)+')')
+                    frame = status.get('frame')
+                    if footer is not None and footer.get('ownerValid') is False:
+                        dismiss()
+                    elif footer is None and owner_frame is not None and frame and (not frame.get('visible') or frame.get('id') != owner_frame):
+                        dismiss()
+                    elif not active(LOCAL):
+                        if local_exit(owner_pid)=='closed':closed()
+                        else:dismiss(restore_stock=True)
+                    elif not vr.dashboard_visible():
+                        dismiss()
+                    elif vr.handle(PANEL) and vr.visible(vr.handle(PANEL)):
+                        hidden_since = None
+                        send('renew')
+                    else:
+                        # Close hides the overlay just before its process exits.
+                        # Give systemd time to report that successful exit before
+                        # treating a still-running hidden panel as a failure.
+                        if hidden_since is None:hidden_since=time.monotonic()
+                        if time.monotonic()-hidden_since >= .4:
+                            if local_exit(owner_pid)=='closed':closed()
+                            else:dismiss(restore_stock=True)
+                        else:send('renew')
+                elif not active(NATIVE):
+                    status_code = run(['systemctl', '--user', 'show', NATIVE, '--property=ExecMainStatus', '--value']).stdout.strip()
+                    if status_code == '3':
+                        # Respect Settings > Quit Full Keyboard or a deliberately
+                        # disabled replacement preference instead of respawning.
+                        STOP = True
+                    else:
+                        native_start(key if status.get('open') and steam_key(key) else '')
+                if not owner:hidden_since=None
+            except (OSError, ValueError, RuntimeError, EOFError, TimeoutError, subprocess.SubprocessError):
+                if cdp:
+                    cdp.close(); cdp = None
+                if owner:
+                    dismiss(restore_stock=True)
+                record('retry'); time.sleep(.5)
+            delay = .075 - (time.monotonic() - start)
+            if delay > 0:
+                time.sleep(delay)
+    finally:
+        if owner:
+            dismiss(False, router is None)
+        if router:
+            try:router.evaluate('globalThis.__frameJisFooterRouterV1?.dispose();delete globalThis.__frameJisFooterRouterV1')
+            except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):pass
+            router.close()
+        run(['systemctl', '--user', 'stop', NATIVE])
+        try:
+            send('cancel')
+        except OSError:
+            pass
+        parent.close(); server.close(); SOCKET.unlink(missing_ok=True)
+        try:
+            recovery.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        if cdp:
+            try:
+                cdp.evaluate('delete globalThis.__frameUnifiedJisMetadataV1')
+            except Exception:
+                pass
+            cdp.close()
+        vr.close()
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--guard':
+        return guard(int(sys.argv[2]))
+    if len(sys.argv) > 1 and sys.argv[1] == '--daemon':
+        return daemon()
+    action = sys.argv[1] if len(sys.argv) > 1 else 'toggle'
+    key = sys.argv[2] if len(sys.argv) > 2 else ''
+    if action not in ('show', 'hide', 'toggle', 'status'):
+        raise SystemExit('Expected show, hide, toggle or status')
+    if not key and action in ('show', 'toggle'):
+        listing = run([VRCMD, '--overlays']).stdout
+        keys = re.findall(r"^'([^']+)' -- 'KDE Wayland Compositor(?: - [^']*)?'", listing, re.M)
+        if len(keys) != 1:
+            raise SystemExit('Open the desktop first')
+        key = keys[0]
+    run(['systemctl', '--user', 'start', 'frame-jis-keyboard.service'], check=True)
+    deadline = time.monotonic() + 5
+    while not SOCKET.exists() and time.monotonic() < deadline:
+        time.sleep(.05)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(22); client.connect(str(SOCKET))
+        client.sendall(json.dumps({'action': action, 'key': key}).encode())
+        response = json.loads(client.recv(4096))
+        print(json.dumps(response))
+        if not response.get('ok'):
+            raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()
