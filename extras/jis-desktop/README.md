@@ -1,5 +1,7 @@
 # Optional JIS desktop setup for Steam Frame
 
+**English** | [日本語](README.ja.md)
+
 ![Japanese JIS keyboard with conversion keys](../../docs/images/keyboard-jis-graphite.png)
 
 This opt-in setup adds a full-size JIS keyboard with romaji-to-kana/kanji
@@ -30,7 +32,7 @@ separate validation. This is not input for streamed VR applications.
 The layout keeps the ordinary JIS geometry and changes only the half/full-width
 key action. In the tested desktop keymap, Linux evdev 85 has no symbol, while
 evdev 41 resolves to `Zenkaku_Hankaku`. The custom key therefore uses the logical
-`Backquote` action, retaining the visible **?/?** label. The language profile
+`Backquote` action, retaining the visible **半/全** label. The language profile
 uses the real `jp106`/`jp` keymap and requires this physical action.
 
 The helper starts Anthy separately from KDE's automatic virtual-keyboard UI.
@@ -130,7 +132,7 @@ gsettings set org.freedesktop.ibus.engine.anthy.common input-mode 0
 ```
 
 An already running Anthy engine can retain its current mode. After selecting the
-new launcher, use **?/?** to choose Japanese or ASCII input. The launcher starts
+new launcher, use **半/全** to choose Japanese or ASCII input. The launcher starts
 the desktop IME when needed; it is independent of the keyboard's visibility.
 
 For the tested Flatpak Chrome setup, use X11/XIM. Back up an existing flags file
@@ -150,8 +152,8 @@ browser profiles, cookies, saved passwords, or page content.
 1. Open **Full Keyboard (show/hide)** from the application list. Opening it again
    closes it; the next launch shows it. The dashboard must remain open to type.
 2. Select a harmless field in the desktop application.
-3. Enter `nihon`, press Space, then Enter. The application should receive **??**.
-4. Press **?/?**, then enter `nihon`: it should remain ASCII. Press **?/?** again
+3. Enter `nihon`, press Space, then Enter. The application should receive **日本**.
+4. Press **半/全**, then enter `nihon`: it should remain ASCII. Press **半/全** again
    and confirm kana/kanji conversion resumes.
 
 The committed profiles must pass the normal application's `--check`. Rendering
