@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+"""Start desktop Anthy independently from the automatic VR keyboard UI."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+def run(args, env=None, timeout=8):
+    if Path(args[0]).name in ('systemctl', 'systemd-run'):
+        env = dict(os.environ if env is None else env)
+        env['XDG_RUNTIME_DIR'] = '/run/user/' + str(os.getuid())
+        env['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=' + env['XDG_RUNTIME_DIR'] + '/bus'
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
+
+def main():
+    environments = []
+    for proc in Path('/proc').glob('[0-9]*'):
+        try:
+            if proc.stat().st_uid != os.getuid() or (proc / 'comm').read_text().strip() != 'plasmashell':
+                continue
+            env = dict(item.decode().split('=', 1) for item in (proc / 'environ').read_bytes().split(b'\0') if b'=' in item)
+            if env.get('XDG_RUNTIME_DIR', '').endswith('/nested_plasma'):
+                environments.append(env)
+        except OSError:
+            continue
+    if len(environments) != 1:
+        raise RuntimeError('Open the desktop before starting Japanese input')
+    env = environments[0]
+    bus = ['busctl', '--timeout=3', '--address=' + env['DBUS_SESSION_BUS_ADDRESS']]
+    result = run(bus + ['get-property', 'org.kde.KWin', '/VirtualKeyboard', 'org.kde.kwin.VirtualKeyboard', 'enabled'])
+    if result.returncode:
+        raise RuntimeError('Could not check automatic keyboard setting')
+    if result.stdout.strip() != 'b false':
+        result = run(bus + ['set-property', 'org.kde.KWin', '/VirtualKeyboard', 'org.kde.kwin.VirtualKeyboard', 'enabled', 'b', 'false'])
+        if result.returncode:
+            raise RuntimeError('Could not disable automatic keyboard')
+    unit = 'frame-desktop-jis-ime.service'
+    existing = run(['systemctl', '--user', 'show', unit, '-p', 'MainPID', '--value'])
+    matching = False
+    try:
+        pid = int(existing.stdout.strip())
+        old_env = dict(item.decode().split('=', 1) for item in (Path('/proc') / str(pid) / 'environ').read_bytes().split(b'\0') if b'=' in item)
+        matching = all(old_env.get(key) == env.get(key) for key in ['DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY'])
+    except (OSError, ValueError):
+        pass
+    if not matching:
+        run(['systemctl', '--user', 'stop', unit])
+        command = ['systemd-run', '--user', '--collect', '--unit=' + unit,
+                   '--description=Japanese IME for the nested desktop']
+        for key in ['DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
+                    'XAUTHORITY', 'XDG_CURRENT_DESKTOP', 'XDG_SESSION_TYPE', 'HOME', 'LANG']:
+            if key in env:
+                command += ['--setenv=' + key + '=' + env[key]]
+        command += ['--', '/usr/bin/ibus-daemon', '--replace', '--xim',
+                    '--panel=/usr/lib/ibus/ibus-ui-gtk3', '--emoji-extension=disable']
+        result = run(command)
+        if result.returncode:
+            raise RuntimeError('Could not start desktop Japanese IME')
+    deadline = time.monotonic() + 4
+    while True:
+        result = run(['/usr/bin/ibus', 'engine', 'anthy'], env, timeout=2)
+        if result.returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Desktop Japanese IME is not ready')
+        time.sleep(.1)
+    print(json.dumps({'ime': 'anthy', 'automatic_virtual_keyboard': False,
+                      'standalone_desktop_ime': True, 'new_session': not matching}))
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

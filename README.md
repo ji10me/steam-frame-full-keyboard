@@ -95,6 +95,9 @@ See [language setup and switching](docs/languages.md).
 
 For Japanese, pick **Romaji**, **Kana**, or **JIS** from the Language dropdown in Settings. Romaji and Kana compose text in the keyboard and use the system Anthy dictionary for kanji conversion. Space converts; Enter commits the composition. Another Enter sends a normal Enter key. JIS mode requires an existing system IME. See [Japanese input](docs/japanese.md).
 
+An optional [desktop JIS setup](extras/jis-desktop/README.md) provides romaji input
+through IBus/Anthy and a manual show/hide launcher for the nested desktop.
+
 Chinese and Korean compose locally and can be selected alongside English and integrated Japanese without a system layout change. [The language guide](docs/languages.md#chinese-and-korean-composition) explains candidates, Hangul, and input limitations.
 
 Copy a bundled JSON profile from `~/.local/share/framekeyboard/current/share/framekeyboard/` into the matching folder below, edit it, then use the **Reload config** icon in Settings:

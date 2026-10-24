@@ -41,3 +41,11 @@ Then select JIS (system IME) in Settings. Selecting JIS while still declaring a 
 Reading is limited to roughly 30 Unicode characters per phrase, with at most 32 in one native commit. Candidate lists expose up to 128 alternatives per segment. Full paragraph editing, segment-boundary resizing, prediction, custom learned dictionaries, half-width kana conversion and repeat while holding composition keys are not implemented. The desktop preview composes locally and never sends OS input.
 
 Host and ARM64 tests cover romaji, voiced/small kana, candidate selection, scripts, failed commit retention, cancellation, opt-in and modifier routing. The dedicated on-device Xwayland receiver verified 日本 via the native UTF-8 connection. That does not establish every nested desktop/browser or external system-IME combination; test a disposable field in the desired application.
+
+## Optional desktop JIS setup
+
+For a manually launched JIS keyboard using the nested desktop's existing
+IBus/Anthy conversion, see the [optional desktop setup](../extras/jis-desktop/README.md).
+It includes a Frame-specific half/full-width key mapping and a desktop show/hide
+launcher. This is an opt-in configuration recipe, separate from integrated
+composition and the experimental native replacement bridge.

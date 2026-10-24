@@ -1,0 +1,137 @@
+#!/usr/bin/python3
+"""User-invoked show/hide control for the installed Full Keyboard JIS profile."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+
+HOME_DIR = Path.home()
+STATE_DIR = HOME_DIR / '.local/state/framekeyboard-toggle'
+RELEASE_DIR = (HOME_DIR / '.local/share/framekeyboard/releases').resolve()
+LAUNCHER = HOME_DIR / '.local/bin/framekeyboard'
+VRCMD = '/opt/steamvr/bin/linuxarm64/vrcmd'
+
+def run(args):
+    env = None
+    if Path(args[0]).name in ('systemctl', 'systemd-run'):
+        env = dict(os.environ)
+        env['XDG_RUNTIME_DIR'] = '/run/user/' + str(os.getuid())
+        env['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=' + env['XDG_RUNTIME_DIR'] + '/bus'
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=10)
+
+def installed_instances():
+    result = []
+    for entry in Path('/proc').glob('[0-9]*'):
+        try:
+            if entry.stat().st_uid != os.getuid() or (entry / 'comm').read_text().strip() != 'framekeyboard':
+                continue
+            executable = (entry / 'exe').resolve(strict=True)
+            if executable.name != 'framekeyboard' or not executable.is_relative_to(RELEASE_DIR):
+                continue
+            start = (entry / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+            result.append((int(entry.name), start))
+        except (OSError, ProcessLookupError):
+            continue
+    return result
+
+def same_process(pid, start):
+    try:
+        return (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()[19] == start
+    except OSError:
+        return False
+
+def select_desktop():
+    listing = run([VRCMD, '--overlays'])
+    if listing.returncode:
+        raise RuntimeError('SteamVR is not responding')
+    keys = []
+    for line in listing.stdout.splitlines():
+        found = re.match(r"'([^']+)' -- 'KDE Wayland Compositor(?: - [^']*)?'", line)
+        if found:
+            keys.append(found.group(1))
+    if len(keys) != 1:
+        raise RuntimeError('Open the desktop before using the JIS keyboard')
+    # Close the stock keyboard through its normal dashboard lifecycle, then
+    # choose the desktop explicitly instead of Steam's main/search dashboard.
+    if run([VRCMD, '--hidedashboard']).returncode:
+        raise RuntimeError('Could not close the previous keyboard presentation')
+    time.sleep(.12)
+    if run([VRCMD, '--showdashboard', keys[0]]).returncode:
+        raise RuntimeError('Could not select the desktop')
+    return keys[0]
+
+def stop(instances):
+    for pid, start in instances:
+        if same_process(pid, start):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 6
+    while any(same_process(pid, start) for pid, start in instances):
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Full Keyboard has not finished closing')
+        time.sleep(.05)
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else 'toggle'
+    if action not in ('toggle', 'show', 'hide'):
+        raise RuntimeError('Unknown keyboard action')
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR / 'control.lock').open('w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        before = installed_instances()
+        hide = action == 'hide' or (action == 'toggle' and bool(before))
+        if hide:
+            stop(before)
+            desktop = select_desktop()
+            actual = 'hidden'
+        else:
+            result = run([str(HOME_DIR / '.local/bin/frame-jis-ime-start')])
+            if result.returncode:
+                raise RuntimeError('Could not prepare desktop Japanese input')
+            desktop = select_desktop()
+            unit = 'framekeyboard-jis-manual-' + str(time.monotonic_ns()) + '.service'
+            result = run(['systemd-run', '--user', '--collect', '--unit=' + unit,
+                          '--description=Full Keyboard JIS manual launch', '--',
+                          str(LAUNCHER), '--vr', '--input', 'ei', '--start-enabled',
+                          '--target-language', 'ja-jis-frame'])
+            if result.returncode:
+                raise RuntimeError('Could not launch Full Keyboard')
+            deadline = time.monotonic() + 3
+            while not installed_instances():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Full Keyboard did not start')
+                time.sleep(.05)
+            deadline = time.monotonic() + 5
+            while True:
+                listing = run([VRCMD, '--overlays'])
+                if any(line.startswith("'org.framekeyboard.panel'") and ' visible ' in line
+                       for line in listing.stdout.splitlines()):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Full Keyboard started but is not visible')
+                time.sleep(.05)
+            actual = 'shown'
+        report = {'requested': action, 'result': actual, 'desktop_overlay': desktop,
+                  'before_pids': [p for p, _ in before],
+                  'after_pids': [p for p, _ in installed_instances()],
+                  'time_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+        (STATE_DIR / 'last-action.json').write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps(report))
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        try:
+            run(['notify-send', 'Full Keyboard', '\u30ad\u30fc\u30dc\u30fc\u30c9\u306e\u5207\u308a\u66ff\u3048\u306b\u5931\u6557\u3057\u307e\u3057\u305f\u3002\u30c7\u30b9\u30af\u30c8\u30c3\u30d7\u3092\u958b\u3044\u3066\u3084\u308a\u76f4\u3057\u3066\u304f\u3060\u3055\u3044\u3002'])
+        except Exception:
+            pass
+        sys.exit(1)
