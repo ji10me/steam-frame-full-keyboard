@@ -1,5 +1,7 @@
 # Optional JIS desktop setup for Steam Frame
 
+![Japanese JIS keyboard with conversion keys](../../docs/images/keyboard-jis-graphite.png)
+
 This opt-in setup adds a full-size JIS keyboard with romaji-to-kana/kanji
 conversion through the desktop's existing IBus/Anthy engine. It also provides a
 manual **Full Keyboard (show/hide)** launcher that selects the desktop and avoids

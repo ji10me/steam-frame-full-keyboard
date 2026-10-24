@@ -4,9 +4,9 @@ A full-size alternative to Steam Frame's built-in virtual keyboard, made for eve
 
 **Full Keyboard is launched manually by default.** By default, SteamOS's keyboard button opens the original keyboard. An experimental **Replace native keyboard** option in Experimental redirects supported requests while Full Keyboard is running. It requires Steam Developer Mode and falls back to the original keyboard when unavailable. Enable **Start with SteamOS** in the same card to start replacement in the background at login. It stays hidden until summoned. See [native replacement](docs/native-replacement.md).
 
-![Full Keyboard with the Graphite theme](docs/images/keyboard-graphite.png)
+![Full Keyboard Japanese JIS layout with the Graphite theme](docs/images/keyboard-jis-graphite.png)
 
-*The default English layout and Graphite theme, captured from the app's native renderer.*
+*Japanese JIS layout and Graphite theme, rendered by the native app using the [desktop JIS profiles](extras/jis-desktop/README.md).*
 
 ## What it does
 
