@@ -1235,6 +1235,7 @@ void favorite_schema() {
         << R"({"schema_version":1,"active":{"layout":"en-us-full","language":"en-us","theme":"graphite"},"favorites":[{"id":"pair","name":"Pair only","layout":"international-full","language":"de-de"}]})";
     const auto config = saved(directory.path);
     require(!config.use_drag_to_move, "legacy configs default to laser movement");
+    require(!config.simple_japanese_ui, "legacy configs keep the full Japanese toolbar");
     require(config.auto_leveling, "legacy configs default to Auto leveling enabled");
     require(config.favorites.size() == 1 && config.favorites.front().selection.language == "de-de",
             "favorite pair does not require a legacy theme field");

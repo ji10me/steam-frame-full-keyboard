@@ -10,10 +10,26 @@ Steam本体のファイルやシステム全体のキー配列は変更しませ
 
 対応するウィンドウ下部のキーボードボタンは、標準キーボードを表示する前にJISへ直接振り分けます。開く・閉じる・再表示で標準キーボードを経由しません。Steamの入力欄では、元の入力先を保持する従来の置換経路を使用します。
 
+アプリ用キーボードの初期高さは、`~/.local/state/frame-jis-keyboard/native-placement.json`の
+`height_offset_m`で調整できます。`0.02`は標準の位置から真上へ2cmです。
+反映には制御ツールの再起動が必要です。表示後の自由な移動には影響しません。
+Steam用の位置は、上記とは別にSteam用設定の`placement.json`へ保存されます。
+
 外部JISをそのままネイティブ置換に指定すると0.8.2では置換対象外となります。
 また、このFrameの構成ではGamescopeへの日本語Unicode出力に問題があるため、
 Steam用とローカルアプリ用の入力経路を分けています。表示するキー配列は両方ともJISです。
 Steam用では半角／全角が内蔵変換を切り替え、ローカル用ではJISの物理キーを送ります。
+
+### Steamメニューでもシンプルな表示を使う
+
+`simple_japanese_ui`に対応したビルドでは、Steam用の
+`~/.config/framekeyboard-unified-jis/steam/config.json`に
+`"simple_japanese_ui": true`を追加すると、追加の変換・確定ボタンを省けます。
+配列とキーの位置は通常のJIS表示と同じで、入力中の文字だけ上部に表示します。
+日本語変換は内蔵エンジンをそのまま使います。Spaceまたは変換キーで変換、
+Space・上下キーで候補切り替え、Enterで確定、半角／全角で英数に切り替えます。
+反映にはSteam用キーボードサービスの再起動が必要です。
+従来の配布済み0.8.2バイナリーはこの項目を無視するため、設定だけでは表示は変わりません。
 
 ## 導入
 
@@ -41,13 +57,16 @@ Steam用の私有設定の`start_with_steamos`は隠して起動するための�
 実際の自動起動は上記のsystemd設定で制御します。
 アプリ自身の起動設定の管理情報は専用の`XDG_CONFIG_HOME`に分離し、通常のユーザーサービス設定と競合させません。
 
-PC配信ウィンドウの対応キーは`valve.steam.desktopgame.2000000420`です。
+通常ウィンドウ方式のPC配信は、配信側の`panel.json`に登録された現在のFrameキーを使います。
+Flatpakインスタンス・実プロセス・開始時刻が一致した場合だけPC用設定を選び、
+LinuxデスクトップのIMEを起動せずWindows向けの物理JIS入力を送ります。
+従来の`valve.steam.desktopgame.2000000420`も互換用に対応しています。
 配信プログラムは別プロジェクトに置き、この追加ツールには含めていません。
 デスクトップの既存のFull Keyboard表示／非表示ショートカットは新しい制御ツールへ切り替わります。
 
 ```sh
 ~/.local/bin/frame-jis-keyboard toggle
-~/.local/bin/frame-jis-keyboard toggle valve.steam.desktopgame.2000000420
+~/.local/bin/frame-desktop-keyboard
 ~/.local/bin/frame-jis-keyboard hide
 ~/.local/bin/frame-jis-keyboard status
 ```

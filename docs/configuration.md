@@ -62,6 +62,15 @@ Num Lock is saved immediately as the optional global boolean `num_lock`, default
 
 The General card's Hide numpad checkbox removes Num Lock and all Numpad keys, narrows the case, and keeps the remaining keys at the same size. It is saved as the optional global boolean `hide_numpad`, defaulting to false, and applies to every layout and favorite. Showing the numpad again restores its remembered Num Lock state. The transparent space beside the narrower case is excluded from VR interaction. Settings retains its full card area.
 
+For integrated Japanese input, the optional config-file boolean `simple_japanese_ui`
+(default `false`) removes the extra IME buttons and candidate row. The current
+preedit appears in the main toolbar, keeping the keys at the same size and position
+as the ordinary JIS keyboard. Half/full-width switches Japanese/Latin, Space or
+Convert converts/cycles candidates, arrows select candidates/segments, Enter
+commits, and Esc cancels conversion. The composition engine and text delivery are
+unchanged. This option requires a build containing this setting; older releases
+ignore it. It does not change external system-IME profiles.
+
 Checkbox edits stay pending across dropdown selections. Apply and save activates the chosen profiles and saves all pending favorites, numpad visibility and movement behavior; Back discards pending edits. The checkbox reflects the current layout/language pair, irrespective of theme. Unchecking removes duplicate legacy records of that pair. At most 32 favorite records can be saved.
 
 The main language button cycles through the default saved by Apply and save, then unique valid favorites in saved order. A default that is already a favorite appears once. If the only favorite matches the default, the button has no other state to cycle to. Invalid or unavailable favorites are skipped. Cycling changes the current keyboard without replacing the saved default. Saving pin state while on a favorite also preserves that default. Reload rereads profiles, favorites, pin state, Num Lock and numpad visibility, closes dropdowns, cancels UI captures, and resets pending edits while retaining the current active keyboard. Malformed config edits report an error and retain the last loaded global settings and favorites. Newly added profile files appear after reload; an automatic file watcher is optional.

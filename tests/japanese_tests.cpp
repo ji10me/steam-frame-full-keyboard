@@ -107,6 +107,76 @@ void romaji_legends() {
         }
     }
 }
+void simple_japanese_ui(bool anthy) {
+    char directory[] = "/tmp/framekeyboard-simple-japanese-XXXXXX";
+    require(mkdtemp(directory), "temporary simple Japanese profile");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { fs::remove_all(path); }
+    } cleanup{directory};
+    fs::create_directories(fs::path(directory) / "languages");
+    std::ofstream(fs::path(directory) / "languages/ja-test.json")
+        << R"({"schema_version":1,"id":"ja-test","name":"Test JIS Romaji","locale":"ja-JP",
+               "keymap":{"rules":"evdev","model":"jp106","layout":"jp","variant":"","options":[]},
+               "legends":{"source":"keymap","overrides":{}},
+               "font_families":["sans-serif"],"input_method":"japanese-romaji"})";
+    Settings settings;
+    settings.active = {"ja-jis-full", "ja-test", "graphite"};
+    settings.simple_japanese_ui = true;
+    save_settings(directory, settings);
+    std::vector<std::string> errors;
+    require(load_settings(directory, errors).simple_japanese_ui && errors.empty(),
+            "simple Japanese preference survives saving");
+    Options options;
+    options.config_dir = directory;
+    options.mode = Mode::Vr;
+    options.input = InputBackend::Ei;
+    options.start_enabled = true;
+    Sink sink;
+    App app(options, sink);
+    auto stable_keys = [&] {
+        const auto view = app.view();
+        auto ordinary = view;
+        ordinary.composing = false;
+        for (int y = 96; y < panel_height; y += 12) {
+            for (int x = 0; x < panel_width; x += 12) {
+                require(app.renderer.hit_key(view, x, y) == app.renderer.hit_key(ordinary, x, y),
+                        "simple Japanese keys stay at ordinary keyboard positions");
+            }
+        }
+        for (const auto& button : view.controls) {
+            require(!button.id.starts_with("ime-"), "simple Japanese has no extra IME buttons");
+        }
+    };
+    require(app.view().simple_japanese_ui && app.view().composing, "simple mode keeps Japanese IME");
+    stable_keys();
+    for (const auto* id : {"KeyN", "KeyI", "KeyH", "KeyO", "KeyN"}) {
+        click_key(app, id);
+    }
+    require(app.view().preedit == "にほn", "simple Japanese composes romaji");
+    stable_keys();
+    if (anthy) {
+        click_key(app, "Space");
+        for (int i = 0; i < 100 && app.view().preedit != "【日本】"; ++i) {
+            click_key(app, "Space");
+        }
+        require(app.view().preedit == "【日本】", "Space selects 日本 without candidate buttons");
+        stable_keys();
+    }
+    click_key(app, "Enter");
+    require(sink.text == std::vector<std::string>{anthy ? "日本" : "にほん"},
+            "simple Japanese commits through text sink");
+    click_key(app, "ZenkakuHankaku");
+    require(!app.view().composing, "half/full switches simple mode to Latin");
+    click_key(app, "ShiftLeft");
+    click_key(app, "Digit2");
+    require(sink.text.back() == "\"", "simple JIS Latin preserves shifted JIS symbols");
+    click_key(app, "ZenkakuHankaku");
+    click_key(app, "KeyA");
+    require(app.view().preedit == "あ", "half/full returns to Japanese");
+    app.set_interaction_active(false);
+    require(app.view().preedit.empty(), "hiding simple keyboard cancels unfinished input");
+}
 int main() {
     try {
         romaji_legends();
@@ -194,6 +264,7 @@ int main() {
             require(!std::getenv("FRAMEKEYBOARD_TEST_ANTHY_REQUIRED"), "Anthy required for this run");
             std::cout << "Anthy integration skipped: library absent.\n";
         }
+        simple_japanese_ui(anthy != nullptr);
         char directory[] = "/tmp/framekeyboard-japanese-XXXXXX";
         require(mkdtemp(directory), "temporary profile");
         struct Cleanup {

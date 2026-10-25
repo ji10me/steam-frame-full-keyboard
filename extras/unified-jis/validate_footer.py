@@ -47,7 +47,7 @@ try:
     report['nativeVisibleSamples']=len(samples)
     assert wait(lambda:vr.geometry(module['PANEL']) is not None,2),'Keyboard pose was not available'
     current=vr.geometry(module['PANEL'])
-    config=module['CONFIG']/('pc' if key==module['PC'] else 'desktop')
+    config=module['CONFIG']/('pc' if module['pc_target'](key) else 'desktop')
     desired=json.loads((config/'placement.json').read_text())
     report['initialPositionErrorM']=max(abs(current['center'][r][3]-desired['transform'][r][3]) for r in range(3))
     report['keyboardWidthM']=current['width']

@@ -50,6 +50,7 @@ struct Settings {
     bool pinned{};
     bool num_lock{};
     bool hide_numpad{};
+    bool simple_japanese_ui{};
     bool use_drag_to_move{};
     bool auto_leveling{true};
     bool replace_native_keyboard{};

@@ -100,6 +100,7 @@ struct PanelView {
     std::string status;
     bool settings{};
     bool composing{};
+    bool simple_japanese_ui{};
     bool hide_numpad{};
     std::string preedit;
     std::map<std::string, std::string> key_labels;

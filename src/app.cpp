@@ -209,7 +209,7 @@ std::vector<Control> App::controls() const {
                                false,
                                Icon::Close});
     const auto ime_start = result.size();
-    if (japanese()) {
+    if (japanese() && !settings_.simple_japanese_ui) {
         add({ControlKind::ImeToggle},
             {"ime-toggle", japanese_latin_ ? "A / あ" : "あ / A", {610, 12, 115, 42}});
         if (!japanese_latin_) {
@@ -376,6 +376,7 @@ PanelView App::view() const {
         v.status += "Steam keyboard remains available.";
     }
     v.composing = japanese() && !japanese_latin_;
+    v.simple_japanese_ui = japanese() && settings_.simple_japanese_ui;
     if (v.composing) {
         v.preedit = composition_.preedit(true);
         if (v.language->input_method == "japanese-kana") {

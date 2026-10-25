@@ -153,5 +153,10 @@ class Overlay:
         geometry=self.geometry(parent_key)
         if not geometry:raise ValueError('Parent overlay pose unavailable')
         transform,width=keyboard_pose(geometry,self.profile,self.head_pose())
+        # A user preference in metres, independent of the window's size/tilt.
+        lift=float((self.profile or {}).get('height_offset_m',0))
+        if not math.isfinite(lift) or abs(lift)>.25:
+            raise ValueError('Invalid keyboard height offset')
+        transform[1][3]+=lift
         return {'schema_version':1,'space':'standing','universe':'0',
                 'transform':transform,'width_m':width}

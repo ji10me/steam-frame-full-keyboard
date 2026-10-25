@@ -231,6 +231,13 @@ void exercise(Layout layout, Theme theme, Language language) {
     view.preedit = "日本語";
     view.controls.push_back({"candidate", "日本語", {85, 148, 230, 42}});
     compare.frame(view, "candidate");
+    view.controls.pop_back();
+    view.simple_japanese_ui = true;
+    compare.frame(view, "simple Japanese preedit");
+    view.preedit.clear();
+    compare.frame(view, "simple Japanese idle");
+    view.simple_japanese_ui = false;
+    compare.frame(view, "restore full Japanese toolbar");
     view.composing = false;
     view.preedit.clear();
     view.key_labels.clear();

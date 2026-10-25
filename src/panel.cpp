@@ -65,7 +65,8 @@ struct Placement {
 };
 Placement placement(const PanelView& view, bool normal = false) {
     const double margin = view.theme->padding;
-    const double toolbar_height = view.composing && !normal ? 208 : normal_toolbar_height;
+    const double toolbar_height =
+        view.composing && !view.simple_japanese_ui && !normal ? 208 : normal_toolbar_height;
     const double scale =
         std::min((panel_width - 2 * margin) / view.layout->width,
                  (panel_height - toolbar_height - 2 * margin - view.theme->depth) / view.layout->height);
@@ -399,6 +400,7 @@ void PanelRenderer::paint(const PanelView& view, double now, bool force_full) {
         previous_->caps != view.keyboard->caps() || previous_->num != view.keyboard->num() ||
         previous_->view.controls != view.controls || previous_->view.status != view.status ||
         previous_->view.settings != view.settings || previous_->view.composing != view.composing ||
+        previous_->view.simple_japanese_ui != view.simple_japanese_ui ||
         previous_->view.hide_numpad != view.hide_numpad || previous_->view.preedit != view.preedit ||
         previous_->view.key_labels != view.key_labels;
     bool full = force_full || scene_changed || view.settings;
@@ -538,7 +540,15 @@ void PanelRenderer::paint(const PanelView& view, double now, bool force_full) {
         }
         cairo_restore(cr);
     }
-    if (view.composing && !view.settings) {
+    if (view.composing && !view.settings && view.simple_japanese_ui) {
+        // Keep key positions stable while composing. Standard JIS keys handle
+        // conversion/selection/commit; only the current preedit uses the toolbar.
+        if (!view.preedit.empty()) {
+            label(cr, view.preedit,
+                  {body.x + 610 * body.width / panel_width, 12, body.width * 685 / panel_width, 42}, 27,
+                  view.language->font, t.legend);
+        }
+    } else if (view.composing && !view.settings) {
         const auto& method = view.language->input_method;
         const char* hint = method == "korean-2set" ? "Type → Space/Enter: commit · Esc: cancel"
                            : method.starts_with("chinese-")

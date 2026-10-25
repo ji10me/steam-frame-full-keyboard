@@ -114,7 +114,7 @@ for mode in ('steam', 'desktop', 'pc'):
                     '--data-dir', str(runtime / 'share/framekeyboard')], check=True, stdout=subprocess.DEVNULL)
 
 shutil.copy2(source / 'systemui_router.js',root / 'systemui_router.js')
-for name in ('frame-jis-keyboard', 'frame_jis_vr.py', 'frame_jis_cdp.py', 'frame-jis-systemui-session'):
+for name in ('frame-jis-keyboard', 'frame_jis_vr.py', 'frame_jis_cdp.py', 'frame_jis_pc.py', 'frame-jis-systemui-session'):
     target = bin_dir / name
     backup(target)
     shutil.copy2(source / name, target)

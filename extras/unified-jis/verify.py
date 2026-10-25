@@ -63,5 +63,5 @@ console.log("Unified JIS: exact-owner opt-in, readiness, mismatch, owner-change 
     test = temp / 'tests/native_bridge_tests.js'
     test.write_text(harness, encoding='utf-8')
     subprocess.run([args.node, str(test), str(bridge / 'steam_bridge.js')], check=True)
-for file in ('frame-jis-keyboard', 'install.py', 'frame_jis_vr.py', 'patch_runtime.py'):
+for file in ('frame-jis-keyboard', 'install.py', 'frame_jis_vr.py', 'frame_jis_pc.py', 'patch_runtime.py'):
     py_compile.compile(str(addon / file), doraise=True)

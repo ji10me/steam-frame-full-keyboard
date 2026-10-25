@@ -17,7 +17,7 @@ from frame_jis_vr import Overlay
 module=runpy.run_path(str(home/'.local/bin/frame-jis-keyboard'),run_name='inspect_only')
 key=sys.argv[1] if len(sys.argv)>1 else module['PC']
 if not module['local_key'](key):raise SystemExit('Expected a supported local overlay key')
-config=module['CONFIG']/('pc' if key==module['PC'] else 'desktop')
+config=module['CONFIG']/('pc' if module['pc_target'](key) else 'desktop')
 preferences=json.loads((config/'config.json').read_text())
 if preferences['active']['layout']!='ja-jis-frame-full' or preferences.get('hide_numpad',False):
     raise SystemExit('Close coordinates require the full, visible-numpad JIS profile')

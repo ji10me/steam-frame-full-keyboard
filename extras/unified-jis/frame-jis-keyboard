@@ -14,6 +14,7 @@ import time
 
 from frame_jis_vr import Overlay
 from frame_jis_cdp import systemui_client
+from frame_jis_pc import pc_target
 
 HOME = Path.home()
 STATE = HOME / '.local/state/frame-jis-keyboard'
@@ -348,9 +349,10 @@ def daemon():
         run(['systemctl', '--user', 'stop', NATIVE], check=True)
         if footer_frame is None:run([VRCMD, '--showdashboard', key], check=True)
         if router:router.evaluate('globalThis.__frameJisFooterRouterV1.beginManual('+json.dumps(key)+')')
-        if key != PC:
+        is_pc=pc_target(key)
+        if not is_pc:
             run([str(HOME / '.local/bin/frame-jis-ime-start')], check=True)
-        config = CONFIG / ('pc' if key == PC else 'desktop')
+        config = CONFIG / ('pc' if is_pc else 'desktop')
         # Seed the native app's own placement before launching. The app then
         # owns dragging/resizing; no follow loop can snap the user's move back.
         placement = config / 'placement.json'

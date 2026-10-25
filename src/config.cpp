@@ -431,6 +431,9 @@ Settings load_settings(const fs::path& user_dir, std::vector<std::string>& error
         if (auto* hidden = field(document.get(), "hide_numpad", json_type_boolean, true)) {
             settings.hide_numpad = json_object_get_boolean(hidden);
         }
+        if (auto* simple = field(document.get(), "simple_japanese_ui", json_type_boolean, true)) {
+            settings.simple_japanese_ui = json_object_get_boolean(simple);
+        }
         if (auto* drag = field(document.get(), "use_drag_to_move", json_type_boolean, true)) {
             settings.use_drag_to_move = json_object_get_boolean(drag);
         }
@@ -519,6 +522,8 @@ void write_settings(const fs::path& user_dir, const Selection& s, const Settings
         json_object_object_add(document.get(), "num_lock", json_object_new_boolean(settings->num_lock));
         json_object_object_add(document.get(), "hide_numpad",
                                json_object_new_boolean(settings->hide_numpad));
+        json_object_object_add(document.get(), "simple_japanese_ui",
+                               json_object_new_boolean(settings->simple_japanese_ui));
         json_object_object_add(document.get(), "use_drag_to_move",
                                json_object_new_boolean(settings->use_drag_to_move));
         json_object_object_add(document.get(), "auto_leveling",
