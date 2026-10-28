@@ -23,6 +23,22 @@ function fixture(key=PC) {
         counts:()=>({shows,hides}),pid(n){pid=n;},advance(ms){time+=ms;timer?.();}};
 }
 {
+    const f=fixture();
+    assert.equal(f.bridge.poll("").localFocus,PC,"idle local focus can prepare the next summon");
+    f.root.DashboardStore.activeFrameID=8;
+    assert.equal(f.bridge.poll("").localFocus,"","another selected frame cannot park Steam");
+    f.root.DashboardStore.activeFrameID=7;f.page.isActiveAndVisiblePage=false;
+    assert.equal(f.bridge.poll("").localFocus,"","hidden pages cannot park Steam");
+    f.page.isActiveAndVisiblePage=true;f.keyboard.supportsKeyboardInput=false;
+    assert.equal(f.bridge.poll("").localFocus,"","unsupported pages retain Steam readiness");
+    f.bridge.dispose(false);
+}
+{
+    const f=fixture();f.root.FrameStore.frames_local[0].pages.push(f.page);
+    assert.equal(f.bridge.poll("").localFocus,"","ambiguous local owners retain Steam readiness");
+    f.bridge.dispose(false);
+}
+{
     const f=fixture();f.bridge.poll("");f.keyboard.ShowKeyboard();
     assert.equal(f.root.DashboardStore.visibilityState_IgnoringKeyboardHack,1);
     let state=f.bridge.poll("");assert.equal(state.pending.action,"show");assert.equal(f.counts().shows,0);

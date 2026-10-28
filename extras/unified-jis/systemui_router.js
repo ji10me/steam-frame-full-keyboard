@@ -145,7 +145,10 @@
             if (!key && !active && !pending && !fallback) releaseDashboard();
             const matching=key ? frames.frames_local.flatMap(frame=>frame.pages || [])
                 .map(page=>target(page.keyboard)).filter(owner=>owner?.key===key) : [];
+            const selected=frames.frames_local.filter(frame=>frame.frameID===dashboard.activeFrameID)
+                .flatMap(frame=>frame.pages || []).map(page=>target(page.keyboard)).filter(Boolean);
             return {pending:metadata(pending),fallbackKey:fallback?.key || "",routed,nativeFallbacks,
+                localFocus:selected.length===1?selected[0].key:"",
                 ownerValid:!key || matching.length===1&&dashboard.activeFrameID===matching[0].frame,
                 ownerFrame:matching.length===1?matching[0].frame:null};
         },

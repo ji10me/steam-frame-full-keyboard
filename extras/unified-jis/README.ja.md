@@ -10,6 +10,13 @@ Steam本体のファイルやシステム全体のキー配列は変更しませ
 
 対応するウィンドウ下部のキーボードボタンは、標準キーボードを表示する前にJISへ直接振り分けます。開く・閉じる・再表示で標準キーボードを経由しません。Steamの入力欄では、元の入力先を保持する従来の置換経路を使用します。
 
+対応するデスクトップ／PC配信画面を選んでいる間は、非表示のSteam用
+キーボードの終了処理を先に進めます。JISを閉じてもすぐにはSteam用を
+起動し直さないため、次のJIS表示で同じ終了処理を待つ時間を減らします。
+Steamへ戻るか、入力先を確認できなくなった場合はSteam用を再び準備します。
+進行中の標準キーボード要求にはこの先行終了を行いません。
+JIS本体の起動と、必要な場合のデスクトップIMEの準備は表示時に行います。
+
 アプリ用キーボードの初期高さは、`~/.local/state/frame-jis-keyboard/native-placement.json`の
 `height_offset_m`で調整できます。`0.02`は標準の位置から真上へ2cmです。
 反映には制御ツールの再起動が必要です。表示後の自由な移動には影響しません。
@@ -41,21 +48,30 @@ Frameで実行します。
 
 ```sh
 python3 install.py
-systemctl --user start frame-jis-keyboard.service
 ```
 
-これで現在のSteamVRセッションに適用されます。再起動後も使う場合だけ、明示的に有効化します。
+インストール時にJIS制御サービスの自動起動を有効にします。
+SteamVRが動作中なら、その場で制御サービスも起動します。
+Frame再起動後はSteamVRの起動に合わせて準備し、キーボードは呼び出すまで非表示です。
+SteamVRが停止中に導入した場合は、次回のSteamVR起動時に適用されます。
 
 起動時にVRメニューのローカル接続を準備します。初回、またはVRメニュー単独の再起動後には、メニュー表示部分を読み直す場合があります。SteamVRサーバー、コンポジター、配信設定は変更しません。接続準備に失敗した場合は従来の置換経路を利用できます。
 
+Steam用の私有設定の`start_with_steamos`は隠して起動するためのアプリ側条件です。
+実際の自動起動はインストーラーが登録するsystemd設定で制御します。
+アプリ自身の起動設定の管理情報は専用の`XDG_CONFIG_HOME`に分離し、通常のユーザーサービス設定と競合させません。
+
+自動起動を止める場合は、次を実行します。再インストールすると自動起動は再び有効になります。
+
 ```sh
-systemctl --user enable frame-jis-keyboard.service
+systemctl --user disable --now frame-jis-keyboard.service
 ```
 
-`install.py --enable-startup`でも同じ自動起動設定を行えます。
-Steam用の私有設定の`start_with_steamos`は隠して起動するためのアプリ側条件です。
-実際の自動起動は上記のsystemd設定で制御します。
-アプリ自身の起動設定の管理情報は専用の`XDG_CONFIG_HOME`に分離し、通常のユーザーサービス設定と競合させません。
+導入済みのJIS制御の自動起動を再び有効にする場合は、次を実行します。
+
+```sh
+systemctl --user enable --now frame-jis-keyboard.service
+```
 
 通常ウィンドウ方式のPC配信は、配信側の`panel.json`に登録された現在のFrameキーを使います。
 Flatpakインスタンス・実プロセス・開始時刻が一致した場合だけPC用設定を選び、
@@ -99,6 +115,8 @@ python verify.py --node /path/to/node
 python test_placement.py
 python test_systemui_transport.py
 python test_local_close.py
+python test_native_idle.py
+python test_install.py
 /path/to/node test_systemui_router.js systemui_router.js
 ```
 

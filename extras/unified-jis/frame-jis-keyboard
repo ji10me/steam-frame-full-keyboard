@@ -89,6 +89,32 @@ def native_start(key=''):
     NATIVE_PROCESS_PID=int(run(['systemctl','--user','show',NATIVE,'-p','MainPID','--value']).stdout.strip() or 0)
 
 
+def native_idle(status, footer):
+    """Finish the hidden Steam shutdown before the next local button press.
+
+    Only an exact, supported local focus permits parking. Unknown focus or an
+    open native request keeps the existing Steam readiness/fallback behavior.
+    """
+    global NATIVE_PROCESS_PID, NATIVE_START_AT
+    running = active(NATIVE)
+    if not running:
+        code = run(['systemctl', '--user', 'show', NATIVE,
+                    '--property=ExecMainStatus', '--value']).stdout.strip()
+        if code == '3' and NATIVE_PROCESS_PID:
+            return False  # Respect Settings > Quit, including while parked.
+    if footer and local_key(footer.get('localFocus')) and not status.get('open'):
+        if running:
+            # Keep polling the footer lease while shutdown drains. activate()
+            # still waits for full shutdown before creating the local panel.
+            run(['systemctl', '--user', 'stop', '--no-block', NATIVE], check=True)
+        NATIVE_PROCESS_PID = 0
+        NATIVE_START_AT = 0
+    elif not running:
+        key = status.get('key')
+        native_start(key if status.get('open') and steam_key(key) else '')
+    return True
+
+
 def focused(vr, key, frame=None):
     if frame is not None:
         try:
@@ -317,7 +343,7 @@ def daemon():
         dismiss()
         record('local-closed')
 
-    def dismiss(resume=True, restore_stock=False):
+    def dismiss(restore_stock=False):
         nonlocal owner, owner_frame, owner_pid
         previous = owner
         previous_frame = owner_frame
@@ -327,15 +353,13 @@ def daemon():
         run(['systemctl', '--user', 'stop', LOCAL])
         if restore_stock:
             restore(vr, previous, previous_frame)
-        if resume:
-            native_start()
+        # Idle policy resumes Steam only when needed. Starting it here would
+        # make the next local summon wait for another complete VR shutdown.
         record('local-dismissed')
 
     def activate(key, from_request=False, footer_frame=None, launch_until=None):
         nonlocal owner, owner_frame, owner_pid, anchors, debounce, hidden_since
         hidden_since=None
-        def resume_native():
-            if footer_frame is None: native_start()
         if not local_key(key) or not vr.handle(key):
             return False
         if not from_request:
@@ -373,7 +397,7 @@ def daemon():
                       '--target-language', 'ja-jis-frame', '--config-dir', str(config),
                       '--data-dir', str(RUNTIME / 'share/framekeyboard')])
         if result.returncode:
-            resume_native(); record('local-start-failed'); return False
+            record('local-start-failed'); return False
         deadline = min(time.monotonic()+8,launch_until) if launch_until is not None else time.monotonic()+8
         while time.monotonic() < deadline:
             panel = vr.handle(PANEL)
@@ -383,12 +407,12 @@ def daemon():
                 break
             if local_exit(0,settle=0)=='closed':
                 complete_local_close(vr,key,0,router,cdp);send('cancel')
-                resume_native();record('local-closed-during-start');return False
+                record('local-closed-during-start');return False
             time.sleep(.05)
         else:
             panel = None
         if not panel or not vr.visible(panel) or not vr.geometry(PANEL):
-            run(['systemctl', '--user', 'stop', LOCAL]); resume_native()
+            run(['systemctl', '--user', 'stop', LOCAL])
             record('local-not-ready'); return False
         latest = cdp.evaluate(META)
         if from_request and latest.get('open') and latest.get('key') != key:
@@ -417,7 +441,6 @@ def daemon():
     # owner state was committed. This dedicated unit cannot belong to another
     # keyboard launcher; finish its shutdown before taking the single instance.
     run(['systemctl', '--user', 'stop', LOCAL])
-    native_start()
     record('started')
     try:
         while not STOP:
@@ -453,12 +476,12 @@ def daemon():
                                 if owner:dismiss()
                                 router.evaluate(f'globalThis.__frameJisFooterRouterV1.ack({handled_footer},false)')
                             elif allowed and request['action']=='show' and router.evaluate(f'globalThis.__frameJisFooterRouterV1.busy({handled_footer})'):
-                                if owner:dismiss(False)
+                                if owner:dismiss()
                                 prepare_recovery(key,frame)
                                 success=activate(key,True,footer_frame=frame,launch_until=time.monotonic()+4.5)
                                 accepted=success and router.evaluate(f'globalThis.__frameJisFooterRouterV1.ack({handled_footer},true,{owner_pid})')
                                 if not accepted:
-                                    if owner:dismiss(False)
+                                    if owner:dismiss()
                                     else:run(['systemctl','--user','stop',LOCAL]);send('cancel')
                                     router.evaluate(f'globalThis.__frameJisFooterRouterV1.reject({handled_footer})')
                                     native_bypass=key;native_start()
@@ -466,7 +489,7 @@ def daemon():
                             status=cdp.evaluate(META)
                     except (OSError,ValueError,RuntimeError,EOFError,TimeoutError,subprocess.SubprocessError):
                         previous=owner
-                        if owner:dismiss(False,True)
+                        if owner:dismiss(restore_stock=True)
                         router.close();router=None;router_retry=time.monotonic()+3
                         native_bypass=previous;native_start();record('direct-footer-unavailable')
                 readable, _, _ = select.select([server], [], [], 0)
@@ -484,7 +507,7 @@ def daemon():
                             ok = True
                         elif action in ('show', 'toggle') and local_key(key):
                             if owner and owner != key:
-                                dismiss(False)
+                                dismiss()
                             ok = owner == key or activate(key)
                         else:
                             ok = action == 'status'
@@ -497,7 +520,7 @@ def daemon():
                 if local_request and owner==key and not active(LOCAL):
                     if local_exit(owner_pid)=='closed':closed()
                     else:
-                        dismiss(False,True);native_bypass=key;native_start()
+                        dismiss(restore_stock=True);native_bypass=key;native_start()
                         if router:router.evaluate('globalThis.__frameJisFooterRouterV1.nativeFallback('+json.dumps(key)+')')
                     local_request=False
                     status=cdp.evaluate(META)
@@ -508,13 +531,13 @@ def daemon():
                         close_stock(key); dismiss(); debounce = time.monotonic() + .6
                     else:
                         if owner:
-                            dismiss(False)
+                            dismiss()
                         if not activate(key, from_request=True):
                             # Retain native and avoid retrying one unsupported
                             # request every frame while startup is failing.
                             debounce = time.monotonic() + 3
                 elif owner and status.get('open') and key != owner:
-                    dismiss(False)
+                    dismiss()
                     native_start(key if steam_key(key) else '')
                 if owner:
                     # Activation can change the owner and selected frame. The
@@ -544,14 +567,8 @@ def daemon():
                             if local_exit(owner_pid)=='closed':closed()
                             else:dismiss(restore_stock=True)
                         else:send('renew')
-                elif not active(NATIVE):
-                    status_code = run(['systemctl', '--user', 'show', NATIVE, '--property=ExecMainStatus', '--value']).stdout.strip()
-                    if status_code == '3':
-                        # Respect Settings > Quit Full Keyboard or a deliberately
-                        # disabled replacement preference instead of respawning.
-                        STOP = True
-                    else:
-                        native_start(key if status.get('open') and steam_key(key) else '')
+                elif not native_idle(status, footer):
+                    STOP = True
                 if not owner:hidden_since=None
             except (OSError, ValueError, RuntimeError, EOFError, TimeoutError, subprocess.SubprocessError):
                 if cdp:
@@ -564,7 +581,7 @@ def daemon():
                 time.sleep(delay)
     finally:
         if owner:
-            dismiss(False, router is None)
+            dismiss(restore_stock=router is None)
         if router:
             try:router.evaluate('globalThis.__frameJisFooterRouterV1?.dispose();delete globalThis.__frameJisFooterRouterV1')
             except (OSError,ValueError,RuntimeError,EOFError,TimeoutError):pass

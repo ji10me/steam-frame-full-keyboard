@@ -2,7 +2,7 @@
 """Install this optional addon beside an existing verified 0.8.2 installation.
 
 Run on the headset with the addon scripts only, never a source checkout/build.
-No boot enablement is performed without the explicit --enable-startup option.
+Installing this opt-in addon enables its coordinator at SteamVR startup.
 """
 import hashlib
 import json
@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 
 from patch_runtime import patch
 
@@ -66,7 +65,7 @@ if not runtime.exists():
 
 # Keep the ordinary release/current package shape for the app's startup
 # validation. Its startup metadata uses a private XDG home below; actual boot
-# activation remains exclusively controlled by the coordinator's enable flag.
+# activation remains exclusively controlled by the coordinator's systemd unit.
 managed_release = root / 'releases/0.8.2-jis'
 if not runtime.is_symlink():
     subprocess.run(['systemctl', '--user', 'stop', 'frame-jis-keyboard.service',
@@ -175,7 +174,11 @@ backup(legacy)
 legacy.write_text('#!/bin/sh\nexec "$HOME/.local/bin/frame-jis-keyboard" "${1:-toggle}"\n')
 legacy.chmod(0o755)
 subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
-if '--enable-startup' in sys.argv:
-    subprocess.run(['systemctl', '--user', 'enable', 'frame-jis-keyboard.service'], check=True)
+subprocess.run(['systemctl', '--user', 'enable', 'frame-jis-keyboard.service'], check=True)
+# Install is also useful before VR is running. Enable it for the next session,
+# and only start now when the SteamVR dependency is already active.
+steamvr_running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'steamvr.service']).returncode == 0
+if steamvr_running:
+    subprocess.run(['systemctl', '--user', 'start', 'frame-jis-keyboard.service'], check=True)
 print(json.dumps({'installed': True, 'runtime': str(runtime), 'backupManifest': str(manifest_file),
-                  'startupRequested': '--enable-startup' in sys.argv}))
+                  'startupRequested': True, 'coordinatorStarted': steamvr_running}))
